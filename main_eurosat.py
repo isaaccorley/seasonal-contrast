@@ -2,6 +2,7 @@ from pathlib import Path
 from copy import deepcopy
 from argparse import ArgumentParser
 
+import torchvision.transforms as T
 import torch
 from torch import nn, optim
 from torchvision.models import resnet
@@ -19,6 +20,8 @@ class Classifier(LightningModule):
     def __init__(self, backbone, in_features, num_classes):
         super().__init__()
         self.encoder = backbone
+        for param in self.encoder.parameters():
+            param.requires_grad = False
         self.classifier = nn.Linear(in_features, num_classes)
         self.criterion = nn.CrossEntropyLoss()
         self.accuracy = Accuracy()
@@ -41,11 +44,17 @@ class Classifier(LightningModule):
         self.log('val/acc', acc, prog_bar=True)
         return loss
 
+    def test_step(self, batch, batch_idx):
+        loss, acc = self.shared_step(batch)
+        self.log('test/loss', loss, prog_bar=True)
+        self.log('test/acc', acc, prog_bar=True)
+        return loss
+
     def shared_step(self, batch):
         x, y = batch
         logits = self(x)
         loss = self.criterion(logits, y)
-        acc = self.accuracy(torch.argmax(logits, dim=1), y)
+        acc = self.accuracy(torch.argmax(logits.softmax(dim=1), dim=1), y)
         return loss, acc
 
     def configure_optimizers(self):
@@ -65,7 +74,13 @@ if __name__ == '__main__':
     parser.add_argument('--ckpt_path', type=str, default=None)
     args = parser.parse_args()
 
-    datamodule = EurosatDataModule(args.data_dir)
+    transforms = [T.ToTensor(), T.Resize((224, 224))]
+    if args.backbone_type == "imagenet":
+        IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406])
+        IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225])
+        transforms.append(T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+
+    datamodule = EurosatDataModule(args.data_dir, transforms=T.Compose(transforms))
 
     if args.backbone_type == 'random':
         backbone = resnet.resnet18(pretrained=False)
@@ -84,5 +99,6 @@ if __name__ == '__main__':
 
     experiment_name = args.backbone_type
     logger = TensorBoardLogger(save_dir=str(Path.cwd() / 'logs' / 'eurosat'), name=experiment_name)
-    trainer = Trainer(gpus=args.gpus, logger=logger, checkpoint_callback=False, max_epochs=100, weights_summary='full')
+    trainer = Trainer(gpus=args.gpus, logger=logger, checkpoint_callback=True, max_epochs=100, weights_summary='full')
     trainer.fit(model, datamodule=datamodule)
+    trainer.test(datamodule=datamodule, ckpt_path="best")
